@@ -180,7 +180,7 @@ def sidebar_menu():
         if st.sidebar.button("➕ Add to Inventory"): st.session_state.nav = "Add to Inventory"
         if st.sidebar.button("🔧 Repairs Management"): st.session_state.nav = "Repairs"
         if st.sidebar.button("🧾 Orders Management"): st.session_state.nav = "Orders Management"
-        if st.sidebar.button("🛠️ Staff Management"): st.session_state.nav = "Staff Management"
+        
         if st.sidebar.button("✏️ Edit Profile"):st.session_state.nav = "Edit Staff Profile"
        
 
@@ -350,6 +350,7 @@ def cart_page():
         st.rerun()
 
 
+
 def payment_page():
     st.header("💳 Payment Page")
     if not st.session_state.cart:
@@ -382,14 +383,21 @@ def payment_page():
         with st.spinner("Processing payment..."):
             time.sleep(2)
 
-        user_id = st.session_state.user['id']
+        # -----------------------------
+        # Get correct Customer_ID
+        # -----------------------------
+        cust = query_one("SELECT Customer_ID FROM Customer WHERE user_id=%s", (st.session_state.user['id'],))
+        if not cust:
+            st.error("Customer record not found.")
+            return
+        customer_id = cust['Customer_ID']
 
         # -----------------------------
-        # Transaction start (pseudo-atomic)
+        # Insert Order
         # -----------------------------
         order_id = execute_with_lastrowid(
             "INSERT INTO Orders (CustomerID, Date, Status) VALUES (%s, %s, %s)",
-            (user_id, date.today(), "Completed")
+            (customer_id, date.today(), "Completed")
         )
 
         if not order_id:
@@ -419,52 +427,100 @@ def payment_page():
 
 
 
+
 def sell_item_page():
     st.title("Sell Item (Customer) — Submit a request")
+    
+    # Get actual Customer_ID
+    cust = query_one("SELECT Customer_ID FROM Customer WHERE user_id=%s", (st.session_state.user['id'],))
+    if not cust:
+        st.error("Customer record not found.")
+        return
+    customer_id = cust['Customer_ID']
+
     with st.form("sell_form"):
         pmid = st.number_input("Product Model ID", min_value=1, step=1)
         desc = st.text_area("Description (condition, scratches, storage, etc.)")
         price = st.number_input("Expected Price", min_value=0.0, step=100.0)
         sdate = st.date_input("Sell Date", value=date.today())
         submitted = st.form_submit_button("Submit Sell Request")
+    
     if submitted:
-        ok = execute("""INSERT INTO CustomerSell (CustomerID, Product_model_ID, ItemDescription, SellDate, SellPrice, Status)
-                        VALUES (%s,%s,%s,%s,%s,'Pending')""",
-                     (st.session_state.user['id'], pmid, desc, sdate, price))
+        ok = execute("""INSERT INTO CustomerSell 
+                        (CustomerID, Product_model_ID, ItemDescription, SellDate, SellPrice, Status)
+                        VALUES (%s, %s, %s, %s, %s, 'Pending')""",
+                     (customer_id, pmid, desc, sdate, price))
         if ok:
             st.success("Sell request submitted (Pending).")
         else:
             st.error("Failed to submit sell request. Check DB constraints.")
+            
 
 def sell_status_page():
     st.title("My Sell Requests")
+
+    # Get actual Customer_ID
+    cust = query_one("SELECT Customer_ID FROM Customer WHERE user_id=%s", (st.session_state.user['id'],))
+    if not cust:
+        st.error("Customer record not found.")
+        return
+    customer_id = cust['Customer_ID']
+
     rows = query("""SELECT cs.CustomerID, cs.Product_model_ID, pm.Model_name, cs.ItemDescription, cs.SellDate, cs.SellPrice, cs.Status
-                    FROM CustomerSell cs JOIN ProductModel pm ON cs.Product_model_ID=pm.Product_model_ID
-                    WHERE cs.CustomerID=%s ORDER BY cs.SellDate DESC""", (st.session_state.user['id'],))
+                    FROM CustomerSell cs 
+                    JOIN ProductModel pm ON cs.Product_model_ID = pm.Product_model_ID
+                    WHERE cs.CustomerID=%s
+                    ORDER BY cs.SellDate DESC""", (customer_id,))
     st.dataframe(rows)
+
 
 def my_orders_page():
     st.title("My Orders")
-    rows = query("""SELECT o.OrderID, o.Date, o.Status,
-                     GROUP_CONCAT(CONCAT(i.Item_ID,':',i.Brand_Name,':₹',i.Price) SEPARATOR ' | ') AS Items
-                     FROM Orders o
-                     JOIN Contains ct ON o.OrderID=ct.OrderID
-                     JOIN Item i ON ct.ItemID=i.Item_ID
-                     WHERE o.CustomerID=%s
-                     GROUP BY o.OrderID, o.Date, o.Status
-                     ORDER BY o.Date DESC""", (st.session_state.user['id'],))
-    st.dataframe(rows)
+
+    # Get the actual Customer_ID
+    cust = query_one("SELECT Customer_ID FROM Customer WHERE user_id=%s", (st.session_state.user['id'],))
+    if not cust:
+        st.error("Customer record not found.")
+        return
+    customer_id = cust['Customer_ID']
+
+    rows = query("""
+        SELECT o.OrderID, o.Date, o.Status,
+               GROUP_CONCAT(CONCAT(i.Item_ID,':',i.Brand_Name,':₹',i.Price) SEPARATOR ' | ') AS Items
+        FROM Orders o
+        JOIN Contains ct ON o.OrderID=ct.OrderID
+        JOIN Item i ON ct.ItemID=i.Item_ID
+        WHERE o.CustomerID=%s
+        GROUP BY o.OrderID, o.Date, o.Status
+        ORDER BY o.Date DESC
+    """, (customer_id,))
+
+    if rows:
+        st.dataframe(rows)
+    else:
+        st.info("You have no orders yet.")
+
+
 
 def request_repair_page():
     st.title("Request Repair")
-    # list customer's items (Info table) OR allow entering ItemID
-    items = query("SELECT i.Item_ID, i.Brand_Name, i.Product_model_ID FROM Item i JOIN Info inf ON i.Item_ID=inf.ItemID WHERE inf.CustomerID=%s", (st.session_state.user['id'],))
+    
+    # Get correct Customer_ID from the Customer table
+    cust = query_one("SELECT Customer_ID FROM Customer WHERE user_id=%s", (st.session_state.user['id'],))
+    if not cust:
+        st.error("Customer record not found.")
+        return
+    customer_id = cust['Customer_ID']
+
+    # List customer's items (Info table) OR allow entering ItemID
+    items = query("SELECT i.Item_ID, i.Brand_Name, i.Product_model_ID FROM Item i JOIN Info inf ON i.Item_ID=inf.ItemID WHERE inf.CustomerID=%s", (customer_id,))
     item_choices = {str(r['Item_ID']): r for r in items}
     options = [""] + list(item_choices.keys())
     item_id = st.selectbox("Select Item (owned by you) or leave blank and type ID below", options=options)
     custom_item_id = st.text_input("Or enter Item ID directly (optional)")
     issue = st.text_area("Describe the issue")
     est_cost = st.number_input("Estimated Acceptable Cost (optional)", min_value=0.0, value=0.0)
+    
     if st.button("Submit Repair Request"):
         target_item_id = None
         if item_id:
@@ -475,23 +531,50 @@ def request_repair_page():
             except:
                 st.error("Invalid Item ID")
                 return
-        # create Repair
-        rid = execute_with_lastrowid("INSERT INTO Repair (Issue, RepairCost, Status, ItemID, Staff_ID) VALUES (%s,%s,%s,%s,%s)",
-                                     (issue, est_cost if est_cost>0 else None, "Pending", target_item_id, None))
+        
+        # Create Repair
+        rid = execute_with_lastrowid(
+            "INSERT INTO Repair (Issue, RepairCost, Status, ItemID, Staff_ID) VALUES (%s,%s,%s,%s,%s)",
+            (issue, est_cost if est_cost>0 else None, "Pending", target_item_id, None)
+        )
         if rid is None:
             st.error("Failed to create repair record.")
             return
-        execute("INSERT INTO RequestRepair (CustomerID, RepairID) VALUES (%s,%s)", (st.session_state.user['id'], rid))
-        st.success(f"Repair request {rid} created.")
+        
+        # Insert into RequestRepair using the correct Customer_ID
+        if execute("INSERT INTO RequestRepair (CustomerID, RepairID) VALUES (%s,%s)", (customer_id, rid)):
+            st.success(f"Repair request {rid} created successfully.")
+        else:
+            st.error("Failed to link repair request to customer.")
+
+
+
 
 def my_repairs_page():
     st.title("My Repair Requests")
-    rows = query("""SELECT r.RepairID, r.Issue, r.RepairCost, r.Status, r.ItemID, s.Name AS Technician
-                   FROM RequestRepair rr
-                   JOIN Repair r ON rr.RepairID = r.RepairID
-                   LEFT JOIN Staff s ON r.Staff_ID = s.Staff_ID
-                   WHERE rr.CustomerID = %s""", (st.session_state.user['id'],))
+    
+    # Get correct Customer_ID from the Customer table
+    cust = query_one("SELECT Customer_ID FROM Customer WHERE user_id=%s", (st.session_state.user['id'],))
+    if not cust:
+        st.error("Customer record not found.")
+        return
+    customer_id = cust['Customer_ID']
+
+    # Fetch repair requests for this customer
+    rows = query("""
+        SELECT r.RepairID, r.Issue, r.RepairCost, r.Status, r.ItemID, s.Name AS Technician
+        FROM RequestRepair rr
+        JOIN Repair r ON rr.RepairID = r.RepairID
+        LEFT JOIN Staff s ON r.Staff_ID = s.Staff_ID
+        WHERE rr.CustomerID = %s
+    """, (customer_id,))
+    
+    if not rows:
+        st.info("No repair requests found.")
+        return
+
     st.dataframe(rows)
+
 
 # ---------------------------
 # Staff pages
